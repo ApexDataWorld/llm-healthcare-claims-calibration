@@ -1,0 +1,38 @@
+{
+  "paper_id": 3,
+  "title": "Abstention Sensitivity",
+  "random_seed": 20260503,
+  "data": {
+    "source": "synthetic",
+    "n_claims": 1800,
+    "train_fraction": 0.5,
+    "calibration_fraction": 0.25,
+    "test_fraction": 0.25
+  },
+  "calibration": {
+    "methods": ["raw", "temperature_scaling", "platt_scaling", "isotonic_regression"],
+    "bins": 10
+  },
+  "abstention": {
+    "thresholds": [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.98],
+    "risk_tiers": {
+      "low": 0.78,
+      "medium": 0.87,
+      "high": 0.95,
+      "mandatory_review": 1.01
+    }
+  },
+  "expected_loss": {
+    "false_approval_cost": 500.0,
+    "false_denial_cost": 1500.0,
+    "false_request_info_cost": 200.0,
+    "human_review_cost": 75.0,
+    "high_risk_delay_cost": 250.0
+  },
+  "outputs": {
+    "dataset_path": "data/synthetic/claims_synthetic.csv",
+    "tables_dir": "paper/tables",
+    "figures_dir": "paper/figures",
+    "report_path": "reports/experiment_summary.md"
+  }
+}
