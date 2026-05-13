@@ -4,6 +4,7 @@ from pathlib import Path
 import struct
 import zlib
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -90,8 +91,8 @@ def save_reliability_diagram(frame: pd.DataFrame, output_path: str, n_bins: int)
     correct = frame["correct"].to_numpy(dtype=float)
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
 
-    x_values = []
-    y_values = []
+    bin_confidence = []
+    bin_accuracy = []
     for idx in range(n_bins):
         lower = bin_edges[idx]
         upper = bin_edges[idx + 1]
@@ -101,13 +102,40 @@ def save_reliability_diagram(frame: pd.DataFrame, output_path: str, n_bins: int)
             mask = (confidence >= lower) & (confidence < upper)
         if not np.any(mask):
             continue
-        x_values.append(confidence[mask].mean())
-        y_values.append(correct[mask].mean())
+        bin_confidence.append(confidence[mask].mean())
+        bin_accuracy.append(correct[mask].mean())
 
-    _plot_line_chart(x_values, y_values, output_path=output_path, title="Reliability Diagram", diagonal=True)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(7, 4.5))
+    plt.plot([0, 1], [0, 1], linestyle="--", label="Perfect calibration")
+    plt.plot(bin_confidence, bin_accuracy, marker="o", linewidth=2, label="Temperature scaling")
+    plt.xlabel("Mean predicted confidence")
+    plt.ylabel("Empirical accuracy")
+    plt.title("Reliability Diagram")
+    plt.xlim(0.0, 1.0)
+    plt.ylim(0.0, 1.0)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
 
 
 def save_risk_coverage_curve(curve: pd.DataFrame, output_path: str) -> None:
-    x_values = curve["coverage"].tolist()
-    y_values = curve["selective_risk"].fillna(0.0).tolist()
-    _plot_line_chart(x_values, y_values, output_path=output_path, title="Risk-Coverage Curve")
+    x_values = curve["coverage"].to_numpy(dtype=float)
+    risk_values = curve["selective_risk"].fillna(0.0).to_numpy(dtype=float)
+    ymax = float(np.max(risk_values) * 1.25) if len(risk_values) else 1.0
+    if ymax <= 0.0:
+        ymax = 1.0
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(7, 4.5))
+    plt.plot(x_values, risk_values, marker="o", linewidth=2, color="#d62728")
+    plt.xlim(0.0, 1.0)
+    plt.ylim(0.0, ymax)
+    plt.xlabel("Coverage")
+    plt.ylabel("Accepted-case error (selective risk)")
+    plt.title("Risk-Coverage Curve")
+    plt.grid(True, alpha=0.3)
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
