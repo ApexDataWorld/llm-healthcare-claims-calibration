@@ -166,6 +166,20 @@ def generate_synthetic_claims(n_claims: int, seed: int) -> SyntheticArtifacts:
     return SyntheticArtifacts(claims=claims, logits=logits, label_to_index=label_to_index)
 
 
+def generate_perturbed_logits_for_consistency(
+    logits: np.ndarray,
+    k_samples: int = 3,
+    seed: int = 20260503,
+    perturbation_scale: float = 0.05,
+) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    logits = np.asarray(logits, dtype=float)
+    logit_std = float(np.std(logits))
+    noise_scale = perturbation_scale * logit_std if logit_std > 0.0 else perturbation_scale
+    noise = rng.normal(loc=0.0, scale=noise_scale, size=(logits.shape[0], k_samples, logits.shape[1]))
+    return logits[:, None, :] + noise
+
+
 def split_dataset(frame: pd.DataFrame, train_fraction: float, calibration_fraction: float) -> dict[str, pd.DataFrame]:
     n_train = int(len(frame) * train_fraction)
     n_calibration = int(len(frame) * calibration_fraction)

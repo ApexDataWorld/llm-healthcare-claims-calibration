@@ -47,10 +47,24 @@ class ExpectedLossConfig(BaseModel):
     high_risk_delay_cost: float = 250.0
 
 
+class CostSensitivityConfig(BaseModel):
+    enabled: bool = True
+    scenarios: List[str] | None = None
+
+
+class ConfidenceVariantConfig(BaseModel):
+    enabled: bool = True
+    variants: List[str] = Field(default_factory=lambda: ["simulated", "consistency", "logit_margin"])
+    consistency_k_samples: int = 3
+    consistency_perturbation_scale: float = 0.05
+    logit_margin_enabled: bool = True
+
+
 class OutputConfig(BaseModel):
     dataset_path: str = "data/synthetic/claims_synthetic.csv"
     tables_dir: str = "paper/tables"
     figures_dir: str = "paper/figures"
+    results_dir: str = "results"
     report_path: str = "reports/experiment_summary.md"
 
 
@@ -62,6 +76,8 @@ class ExperimentConfig(BaseModel):
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     abstention: AbstentionConfig = Field(default_factory=AbstentionConfig)
     expected_loss: ExpectedLossConfig = Field(default_factory=ExpectedLossConfig)
+    cost_sensitivity: CostSensitivityConfig = Field(default_factory=CostSensitivityConfig)
+    confidence_variants: ConfidenceVariantConfig = Field(default_factory=ConfidenceVariantConfig)
     outputs: OutputConfig = Field(default_factory=OutputConfig)
 
 

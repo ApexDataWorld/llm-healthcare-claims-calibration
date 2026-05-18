@@ -43,6 +43,7 @@ def test_experiment_runner_generates_outputs(tmp_path: Path) -> None:
                     "dataset_path": str(tmp_path / "claims.csv"),
                     "tables_dir": str(tmp_path / "tables"),
                     "figures_dir": str(tmp_path / "figures"),
+                    "results_dir": str(tmp_path / "results"),
                     "report_path": str(tmp_path / "report.md"),
                 },
             }
@@ -61,4 +62,6 @@ def test_experiment_runner_generates_outputs(tmp_path: Path) -> None:
     assert (tmp_path / "figures" / "reliability_diagram.png").exists()
     assert (tmp_path / "figures" / "risk_coverage_curve.png").exists()
     assert (tmp_path / "report.md").exists()
-    assert (Path(__file__).resolve().parents[1] / "results" / "bootstrap_results.csv").exists()
+    assert (tmp_path / "results" / "bootstrap_results.csv").exists()
+    assert (tmp_path / "results" / "confidence_variant_results.csv").exists()
+    assert (tmp_path / "results" / "cost_sensitivity_results.csv").exists()

@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
+import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,8 +19,15 @@ from llm_claims_calibration.calibration.methods import (
     CalibrationOutputs,
     apply_correctness_calibrator,
     apply_temperature_scaling,
+    sigmoid,
+)
+from llm_claims_calibration.confidence.variants import (
+    generate_consistency_confidence,
+    generate_logit_margin_confidence,
+    get_simulated_confidence,
 )
 from llm_claims_calibration.config import load_config
+from llm_claims_calibration.cost.sensitivity import get_cost_scenarios, run_threshold_sensitivity_analysis
 from llm_claims_calibration.data.generate_synthetic_claims import LABELS, generate_synthetic_claims, split_dataset
 from llm_claims_calibration.evaluation.bootstrap import bootstrap_calibration_metrics
 from llm_claims_calibration.evaluation.metrics import binary_forecast_metrics
@@ -45,6 +53,158 @@ def build_method_frame(split_frame: pd.DataFrame, outputs: CalibrationOutputs, l
 def choose_best_method(results: pd.DataFrame) -> str:
     ordered = results.sort_values(["ece", "brier_score", "nll"], ascending=True)
     return str(ordered.iloc[0]["method"])
+
+
+def _logit_transform(confidence: np.ndarray) -> np.ndarray:
+    confidence = np.asarray(confidence, dtype=float)
+    clipped = np.clip(confidence, 1e-8, 1.0 - 1e-8)
+    return np.log(clipped / (1.0 - clipped))
+
+
+def _scalar_temperature_scale(
+    calibration_confidence: np.ndarray,
+    calibration_correct: np.ndarray,
+    test_confidence: np.ndarray,
+) -> np.ndarray:
+    calibration_logit = _logit_transform(calibration_confidence)
+    candidates = np.linspace(0.05, 10.0, 400)
+    best_temperature = 1.0
+    best_loss = None
+    for candidate in candidates:
+        calibrated = sigmoid(calibration_logit / candidate)
+        calibrated = np.clip(calibrated, 1e-12, 1.0 - 1e-12)
+        loss = float(
+            -np.mean(
+                calibration_correct * np.log(calibrated)
+                + (1.0 - calibration_correct) * np.log(1.0 - calibrated)
+            )
+        )
+        if best_loss is None or loss < best_loss:
+            best_loss = loss
+            best_temperature = float(candidate)
+    return np.clip(sigmoid(_logit_transform(test_confidence) / best_temperature), 1e-6, 0.999999)
+
+
+def run_confidence_variant_analysis(
+    splits: dict[str, pd.DataFrame],
+    artifacts,
+    config,
+    best_method: str,
+    method_frames: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    _ = best_method
+    n_train = len(splits["train"])
+    n_calibration = len(splits["calibration"])
+    calibration_logits = artifacts.logits[n_train : n_train + n_calibration]
+    test_logits = artifacts.logits[n_train + n_calibration :]
+    calibration_correct = splits["calibration"]["raw_correct"].to_numpy(dtype=float)
+    test_correct = splits["test"]["raw_correct"].to_numpy(dtype=float)
+    risk_tiers = list(config.abstention.risk_tiers.keys())
+    label_to_index = artifacts.label_to_index
+    predicted_test_labels = splits["test"]["predicted_label_raw"].to_numpy()
+    true_test_index = splits["test"]["true_label"].map(label_to_index).to_numpy()
+
+    simulated = get_simulated_confidence(artifacts, splits)
+    confidence_sources: dict[str, dict[str, np.ndarray]] = {
+        "simulated": simulated,
+        "consistency": {
+            "calibration": generate_consistency_confidence(
+                splits["calibration"],
+                calibration_logits,
+                k_samples=config.confidence_variants.consistency_k_samples,
+                seed=config.random_seed,
+                perturbation_scale=config.confidence_variants.consistency_perturbation_scale,
+            ),
+            "test": generate_consistency_confidence(
+                splits["test"],
+                test_logits,
+                k_samples=config.confidence_variants.consistency_k_samples,
+                seed=config.random_seed,
+                perturbation_scale=config.confidence_variants.consistency_perturbation_scale,
+            ),
+        },
+        "logit_margin": {
+            "calibration": generate_logit_margin_confidence(calibration_logits),
+            "test": generate_logit_margin_confidence(test_logits),
+        },
+    }
+
+    selected_variants = []
+    for variant in config.confidence_variants.variants:
+        if variant == "logit_margin" and not config.confidence_variants.logit_margin_enabled:
+            continue
+        selected_variants.append(variant)
+
+    rows = []
+    threshold_rows = []
+    costs = {
+        "false_approval_cost": config.expected_loss.false_approval_cost,
+        "false_denial_cost": config.expected_loss.false_denial_cost,
+        "false_request_info_cost": config.expected_loss.false_request_info_cost,
+        "human_review_cost": config.expected_loss.human_review_cost,
+        "high_risk_delay_cost": config.expected_loss.high_risk_delay_cost,
+    }
+
+    for variant in selected_variants:
+        calibration_confidence = confidence_sources[variant]["calibration"]
+        test_confidence = confidence_sources[variant]["test"]
+        variant_frames: dict[str, pd.DataFrame] = {}
+        for method in config.calibration.methods:
+            if method == "raw":
+                calibrated_confidence = np.clip(test_confidence, 1e-6, 0.999999)
+            elif method == "temperature_scaling":
+                calibrated_confidence = _scalar_temperature_scale(
+                    calibration_confidence=calibration_confidence,
+                    calibration_correct=calibration_correct,
+                    test_confidence=test_confidence,
+                )
+            else:
+                calibrated_confidence = apply_correctness_calibrator(
+                    method=method,
+                    calibration_confidence=calibration_confidence,
+                    calibration_correct=calibration_correct,
+                    test_confidence=test_confidence,
+                    predicted_labels=predicted_test_labels,
+                ).calibrated_confidence
+
+            frame = splits["test"].copy()
+            frame["predicted_label"] = predicted_test_labels
+            frame["raw_confidence"] = test_confidence
+            frame["calibrated_confidence"] = calibrated_confidence
+            frame["correct"] = (pd.Series(predicted_test_labels).map(label_to_index).to_numpy() == true_test_index).astype(int)
+            variant_frames[method] = frame
+            metrics = binary_forecast_metrics(
+                frame["calibrated_confidence"].to_numpy(),
+                test_correct,
+                n_bins=config.calibration.bins,
+            )
+            rows.append({"method": method, "variant": variant, **metrics})
+
+        variant_results = pd.DataFrame([row for row in rows if row["variant"] == variant]).sort_values(["ece", "brier_score", "nll"])
+        selected_method = str(variant_results.iloc[0]["method"])
+        thresholds = optimize_thresholds(
+            variant_frames[selected_method],
+            candidate_thresholds=config.abstention.thresholds,
+            costs=costs,
+            risk_tiers=risk_tiers,
+        )
+        medium = thresholds[thresholds["risk_tier"] == "medium"]
+        if not medium.empty:
+            medium_row = medium.iloc[0]
+            threshold_rows.append(
+                {
+                    "variant": variant,
+                    "method": selected_method,
+                    "threshold": float(medium_row["threshold"]),
+                    "coverage": float(medium_row["coverage"]),
+                    "accepted_accuracy": float(medium_row["accepted_accuracy"]),
+                    "expected_loss": float(medium_row["expected_loss"]),
+                }
+            )
+
+    results = pd.DataFrame(rows).sort_values(["variant", "ece", "brier_score", "nll"]).reset_index(drop=True)
+    results.attrs["threshold_stability"] = pd.DataFrame(threshold_rows)
+    return results
 
 
 def main() -> None:
@@ -114,6 +274,7 @@ def main() -> None:
     calibration_results = pd.DataFrame(calibration_rows).sort_values("ece").reset_index(drop=True)
     best_method = choose_best_method(calibration_results)
     best_frame = method_frames[best_method]
+    variant_results = None
     bootstrap_frames = []
     for method in config.calibration.methods:
         method_bootstrap = bootstrap_calibration_metrics(
@@ -143,6 +304,7 @@ def main() -> None:
         costs=costs,
         risk_tiers=list(config.abstention.risk_tiers.keys()),
     )
+    sensitivity_results = None
 
     tuned_thresholds = dict(zip(threshold_results["risk_tier"], threshold_results["threshold"]))
     for tier, default_threshold in config.abstention.risk_tiers.items():
@@ -172,10 +334,30 @@ def main() -> None:
 
     tables_dir = Path(config.outputs.tables_dir)
     figures_dir = Path(config.outputs.figures_dir)
-    results_dir = REPO_ROOT / "results"
+    results_dir = Path(config.outputs.results_dir)
     tables_dir.mkdir(parents=True, exist_ok=True)
     figures_dir.mkdir(parents=True, exist_ok=True)
     results_dir.mkdir(parents=True, exist_ok=True)
+    if config.confidence_variants and config.confidence_variants.enabled:
+        variant_results = run_confidence_variant_analysis(
+            splits=splits,
+            artifacts=artifacts,
+            config=config,
+            best_method=best_method,
+            method_frames=method_frames,
+        )
+        variant_results.to_csv(results_dir / "confidence_variant_results.csv", index=False)
+    if config.cost_sensitivity and config.cost_sensitivity.enabled:
+        cost_scenarios = get_cost_scenarios()
+        if config.cost_sensitivity.scenarios:
+            cost_scenarios = {name: cost_scenarios[name] for name in config.cost_sensitivity.scenarios}
+        sensitivity_results = run_threshold_sensitivity_analysis(
+            best_frame=best_frame,
+            candidate_thresholds=config.abstention.thresholds,
+            cost_scenarios=cost_scenarios,
+            risk_tiers=list(config.abstention.risk_tiers.keys()),
+        )
+        sensitivity_results.to_csv(results_dir / "cost_sensitivity_results.csv", index=False)
     calibration_results.to_csv(tables_dir / "calibration_results.csv", index=False)
     threshold_results.to_csv(tables_dir / "threshold_results.csv", index=False)
     bootstrap_results.to_csv(results_dir / "bootstrap_results.csv", index=False)
@@ -195,6 +377,8 @@ def main() -> None:
         random_seed=config.random_seed,
         bayesian_prior={"alpha0": BAYESIAN_ALPHA0, "beta0": BAYESIAN_BETA0},
         reproduction_command=reproduction_command,
+        variant_results=variant_results,
+        sensitivity_results=sensitivity_results,
     )
 
 

@@ -29,10 +29,22 @@
     "human_review_cost": 75.0,
     "high_risk_delay_cost": 250.0
   },
+  "cost_sensitivity": {
+    "enabled": true,
+    "scenarios": ["baseline_4x", "high_decision_cost_10x", "high_review_cost_2x", "symmetric_1x"]
+  },
+  "confidence_variants": {
+    "enabled": true,
+    "variants": ["simulated", "consistency", "logit_margin"],
+    "consistency_k_samples": 3,
+    "consistency_perturbation_scale": 0.05,
+    "logit_margin_enabled": true
+  },
   "outputs": {
     "dataset_path": "data/synthetic/claims_synthetic.csv",
     "tables_dir": "paper/tables",
     "figures_dir": "paper/figures",
+    "results_dir": "results",
     "report_path": "reports/experiment_summary.md"
   }
 }
